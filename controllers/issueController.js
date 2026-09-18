@@ -1,6 +1,8 @@
 import { validateIssueInput } from '../validators/issueValidator.js';
 import { success, error } from '../helpers/responseHelper.js';
 import IssueModel from '../models/Issues.js';
+import AuthorityModel from '../models/Authority.js';
+import { ensureWardAuthorityAccount } from '../services/wardAuthorityService.js';
 import { uploadImageToCloudinary } from '../config/cloudinary.js';
 import { validateCivicImage } from '../services/imageDetectorService.js';
 import {
@@ -61,6 +63,13 @@ export async function createIssue(req, res) {
     const jurisdiction = determineJurisdiction(geoData);
     const authorityInfo = routeToResponsibleAuthority(jurisdiction, category || 'Roads & Traffic');
 
+    // 3b. Check & Automatically Generate Ward Authority Account Credentials (SRS Flow)
+    const wardAuthRes = await ensureWardAuthorityAccount(jurisdiction.ward, jurisdiction.name);
+    const wardAuthority = wardAuthRes.authority;
+
+    // Attach ward_id to jurisdiction & ticket
+    jurisdiction.wardId = wardAuthority.ward_id;
+
     // 4. Spatial Deduplication & Ticket Creation
     const issueInput = {
       title: title.trim(),
@@ -75,10 +84,14 @@ export async function createIssue(req, res) {
     const currentIssues = getIssuesStore();
     const result = processSpatialTicket(issueInput, geoData, jurisdiction, authorityInfo, currentIssues);
 
+    if (!result.ticket.wardId) {
+      result.ticket.wardId = wardAuthority.ward_id;
+    }
+
     if (!result.isDuplicate) {
       currentIssues.unshift(result.ticket);
       setIssuesStore(currentIssues);
-    await IssueModel.create(result.ticket);
+      await IssueModel.create(result.ticket);
     }
 
     return success(res, {
@@ -90,6 +103,13 @@ export async function createIssue(req, res) {
       departmentType: authorityInfo.departmentType,
       ward: jurisdiction.ward,
       jurisdiction,
+      wardAccount: {
+        isNew: wardAuthRes.isNew,
+        ward_id: wardAuthority.ward_id,
+        ward_name: wardAuthority.ward_name,
+        local_body: wardAuthority.local_body,
+        password: wardAuthority.password
+      },
       aiScan: imageScan
     }, result.message, 201);
   } catch (err) {
@@ -97,6 +117,7 @@ export async function createIssue(req, res) {
     return error(res, 'Server error processing civic issue report', 500);
   }
 }
+
 
 /**
  * Get all issues with filters (status, category, search, sort, escalation)
@@ -272,36 +293,69 @@ Action Needed: Requesting prompt site inspection and repair by the responsible m
 }
 
 /**
- * Get issues filtered by assigned authority / local body name
- * Supports partial match for flexibility (jurisdiction.name or assignedAuthority)
+ * Get issues filtered by assigned authority / local body name / ward_id
  */
 export async function getIssuesByAuthority(req, res) {
   try {
-    const { authority, ward, status, category } = req.query;
+    const { authority, ward, ward_id, wardId, status, category } = req.query;
 
-    if (!authority && !ward) {
-      return error(res, 'Either "authority" or "ward" query param is required', 400);
+    const inputWardId = ward_id || wardId;
+    let targetWardName = ward || '';
+    let targetAuthorityAccount = null;
+
+    if (inputWardId) {
+      targetAuthorityAccount = await AuthorityModel.findByWardId(inputWardId);
+      if (targetAuthorityAccount) {
+        targetWardName = targetAuthorityAccount.ward_name;
+      }
+    }
+
+    if (!authority && !ward && !inputWardId && !targetWardName) {
+      return error(res, 'Either "ward_id", "ward", or "authority" query param is required', 400);
     }
 
     let issues = await IssueModel.findAll();
     setIssuesStore(issues);
     issues = getDecoratedIssues();
 
-    // Filter by authority name (partial, case-insensitive)
-    if (authority) {
+    // 1. Strict Filter by ward_id or ward name if specified
+    if (inputWardId || targetWardName) {
+      const wId = (inputWardId || '').toLowerCase();
+      const wName = (targetWardName || '').toLowerCase();
+
+      // Extract ward number e.g. "14" from "Central Ward #14"
+      const numMatch = wName.match(/#?(\d+)/);
+      const wardNum = numMatch ? numMatch[1] : null;
+
+      issues = issues.filter((i) => {
+        // Direct wardId match
+        if (wId && (i.wardId?.toLowerCase() === wId || i.jurisdiction?.wardId?.toLowerCase() === wId)) {
+          return true;
+        }
+        // Direct ward name match
+        const jWard = (i.jurisdiction?.ward || '').toLowerCase();
+        const gWard = (i.geoData?.ward || '').toLowerCase();
+        const loc = (i.location || '').toLowerCase();
+
+        if (wName && (jWard.includes(wName) || gWard.includes(wName) || loc.includes(wName))) {
+          return true;
+        }
+
+        // Match ward number if present e.g. Ward #14
+        if (wardNum) {
+          if (jWard.includes(`#${wardNum}`) || jWard.includes(`ward ${wardNum}`) || loc.includes(`ward ${wardNum}`) || loc.includes(`ward #${wardNum}`)) {
+            return true;
+          }
+        }
+
+        return false;
+      });
+    } else if (authority) {
+      // Filter by authority name (partial, case-insensitive)
       const q = authority.toLowerCase();
       issues = issues.filter((i) =>
         (i.assignedAuthority && i.assignedAuthority.toLowerCase().includes(q)) ||
         (i.jurisdiction?.name && i.jurisdiction.name.toLowerCase().includes(q))
-      );
-    }
-
-    // Additional ward filter
-    if (ward) {
-      const w = ward.toLowerCase();
-      issues = issues.filter((i) =>
-        (i.jurisdiction?.ward && i.jurisdiction.ward.toLowerCase().includes(w)) ||
-        (i.geoData?.ward && i.geoData.ward.toLowerCase().includes(w))
       );
     }
 
@@ -326,7 +380,9 @@ export async function getIssuesByAuthority(req, res) {
     });
 
     return res.json({
+      authority: targetAuthorityAccount || { ward_name: targetWardName || authority || 'Ward Authority' },
       issues,
+
       count: issues.length,
       stats: {
         total: issues.length,

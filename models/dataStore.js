@@ -259,8 +259,74 @@ export const seedIssues = [
   }
 ];
 
+export const seedAuthorities = [
+  {
+    ward_id: "WARD-CENTRAL-14",
+    ward_name: "Central Ward #14",
+    local_body: "Delhi Municipal Corporation (Central Ward #14)",
+    password: "WardPass14",
+    department: "Public Works & Engineering",
+    createdAt: new Date().toISOString()
+  },
+  {
+    ward_id: "WARD-GREENPARK-22",
+    ward_name: "Green Park Ward #22",
+    local_body: "Municipal Corporation (Green Park Ward #22)",
+    password: "WardPass22",
+    department: "Solid Waste & Sanitation Board",
+    createdAt: new Date().toISOString()
+  },
+  {
+    ward_id: "WARD-RKM-7",
+    ward_name: "RKM Ward #7",
+    local_body: "NDMC Municipal Body (RKM Ward #7)",
+    password: "WardPass7",
+    department: "Electrical & Street Lighting",
+    createdAt: new Date().toISOString()
+  },
+  {
+    ward_id: "WARD-LAJPAT-8",
+    ward_name: "Lajpat Nagar Ward #8",
+    local_body: "South Delhi Corporation (Lajpat Nagar Ward #8)",
+    password: "WardPass8",
+    department: "Civic Health & Sanitation",
+    createdAt: new Date().toISOString()
+  },
+  {
+    ward_id: "WARD-VASANT-12",
+    ward_name: "Vasant Kunj Ward #12",
+    local_body: "South Delhi Municipal Corporation (Ward #12)",
+    password: "WardPass12",
+    department: "Drainage & Infrastructure",
+    createdAt: new Date().toISOString()
+  }
+];
+
+export const seedUsers = [
+  {
+    id: "usr-prakash",
+    name: "Prakash Kumar",
+    email: "prakash@civicsense.gov.in",
+    password: "password123",
+    avatar: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=150",
+    badge: "Civic Champion",
+    createdAt: new Date().toISOString()
+  },
+  {
+    id: "usr-rahul",
+    name: "Rahul Sharma",
+    email: "rahul@gmail.com",
+    password: "password123",
+    avatar: "https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?w=150",
+    badge: "Active Citizen",
+    createdAt: new Date().toISOString()
+  }
+];
+
 export const memoryStore = {
   issues: [...seedIssues],
+  authorities: [...seedAuthorities],
+  users: [...seedUsers],
   simulatedOffsetHours: 0
 };
 
@@ -270,6 +336,22 @@ export function getIssuesStore() {
 
 export function setIssuesStore(newIssues) {
   memoryStore.issues = newIssues;
+}
+
+export function getAuthoritiesStore() {
+  return memoryStore.authorities;
+}
+
+export function setAuthoritiesStore(newAuthorities) {
+  memoryStore.authorities = newAuthorities;
+}
+
+export function getUsersStore() {
+  return memoryStore.users;
+}
+
+export function setUsersStore(newUsers) {
+  memoryStore.users = newUsers;
 }
 
 export function getSimulatedOffset() {
@@ -284,3 +366,5 @@ export function addSimulatedOffset(hours) {
   memoryStore.simulatedOffsetHours += hours;
   return memoryStore.simulatedOffsetHours;
 }
+
+

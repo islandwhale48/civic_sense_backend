@@ -1,37 +1,38 @@
 import { haversineDistanceMeters } from '../helpers/geoHelper.js';
 
 /**
- * 1. Reverse Geocoding: Get Locality, District, Ward, State, Address
+ * 1. Reverse Geocoding: Get Locality, District, Ward, State, Address with Multi-Provider Resilience
  */
 export async function reverseGeocodeLocation(latitude, longitude) {
   const lat = parseFloat(latitude);
   const lng = parseFloat(longitude);
 
-  // Compute a deterministic ward number based on coordinates if OSM doesn't return one
-  const computedWardNum = Math.abs(Math.floor((lat * 100 + lng * 100) % 24)) + 1;
-  const defaultWard = `Central Ward #${computedWardNum}`;
+  if (isNaN(lat) || isNaN(lng)) {
+    return {
+      address: 'Location coordinates unavailable',
+      locality: 'Central Sector',
+      ward: 'Central Ward #14',
+      district: 'Central District',
+      state: 'State Jurisdiction',
+      lat: 28.6139,
+      lng: 77.2090
+    };
+  }
 
-  const defaultGeo = {
-    address: `Location near (${lat.toFixed(4)}°, ${lng.toFixed(4)}°)`,
-    locality: 'Central Sector',
-    ward: defaultWard,
-    district: 'Central District',
-    state: 'National Capital Territory',
-    postcode: '',
-    lat,
-    lng
-  };
+  // Compute a deterministic ward number (1-30) based on coordinates
+  const coordHash = Math.abs(Math.floor((Math.abs(lat * 1000) + Math.abs(lng * 1000)) % 30));
+  const computedWardNum = coordHash + 1;
+  const defaultWard = `Ward #${computedWardNum}`;
 
-  if (isNaN(lat) || isNaN(lng)) return defaultGeo;
-
+  // Provider 1: OpenStreetMap Nominatim
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
 
     const res = await fetch(
       `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=16&addressdetails=1`,
       {
-        headers: { 'User-Agent': 'CommunityKiHelp-CivicSense/1.0' },
+        headers: { 'User-Agent': 'CivicSense-App/2.0 (Civic platform)' },
         signal: controller.signal
       }
     );
@@ -43,14 +44,15 @@ export async function reverseGeocodeLocation(latitude, longitude) {
 
       const state = a.state || a.region || 'State Jurisdiction';
       const district = a.state_district || a.district || a.county || a.city || 'District Zone';
-      const locality = a.suburb || a.neighbourhood || a.residential || a.village || a.town || a.city_district || 'Locality';
+      const locality = a.suburb || a.neighbourhood || a.residential || a.village || a.town || a.city_district || a.county || 'Locality';
       const road = a.road || a.pedestrian || a.subdistrict || '';
-      const wardName = a.city_district || a.suburb ? `${a.city_district || a.suburb} Ward #${computedWardNum}` : defaultWard;
+      const wardPrefix = a.city_district || a.suburb || locality;
+      const wardName = wardPrefix ? `${wardPrefix} Ward #${computedWardNum}` : defaultWard;
 
       const fullAddr = [road, locality, district, state].filter(Boolean).join(', ');
 
       return {
-        address: fullAddr || defaultGeo.address,
+        address: fullAddr || data.display_name || `Location (${lat.toFixed(4)}°, ${lng.toFixed(4)}°)`,
         locality,
         ward: wardName,
         district,
@@ -62,11 +64,58 @@ export async function reverseGeocodeLocation(latitude, longitude) {
       };
     }
   } catch (err) {
-    console.warn('Reverse geocode notice: using spatial coordinate fallback');
+    console.warn('Nominatim reverse geocode notice: trying secondary provider...');
   }
 
-  return defaultGeo;
+  // Provider 2: BigDataCloud Reverse Geocode API
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+    const res = await fetch(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeoutId);
+
+    if (res.ok) {
+      const bdc = await res.json();
+      const state = bdc.principalSubdivision || 'State Jurisdiction';
+      const district = bdc.localityInfo?.administrative?.[2]?.name || bdc.city || bdc.locality || 'District Zone';
+      const locality = bdc.locality || bdc.city || bdc.localityInfo?.informative?.[0]?.name || 'Locality Zone';
+      const wardName = `${locality} Ward #${computedWardNum}`;
+      const fullAddr = [locality, district, state].filter(Boolean).join(', ');
+
+      return {
+        address: fullAddr || `Location (${lat.toFixed(4)}°, ${lng.toFixed(4)}°)`,
+        locality,
+        ward: wardName,
+        district,
+        state,
+        postcode: bdc.postcode || '',
+        rawAddress: bdc,
+        lat,
+        lng
+      };
+    }
+  } catch (err) {
+    console.warn('Secondary reverse geocode notice: using spatial coordinate fallback');
+  }
+
+  // Provider 3: Fallback based on coordinate string
+  const fallbackLocality = `Sector Zone (${lat.toFixed(2)}°, ${lng.toFixed(2)}°)`;
+  return {
+    address: `Location near (${lat.toFixed(4)}°, ${lng.toFixed(4)}°)`,
+    locality: fallbackLocality,
+    ward: `${fallbackLocality} Ward #${computedWardNum}`,
+    district: 'District Zone',
+    state: 'State Jurisdiction',
+    postcode: '',
+    lat,
+    lng
+  };
 }
+
 
 /**
  * 2. GIS Jurisdiction Classification
