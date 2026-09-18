@@ -1,30 +1,20 @@
-import pool, { checkDbConnected } from '../config/db.js';
-
-// Haversine formula for spatial distance (in meters)
-export function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
-  const R = 6371000; // Earth radius in meters
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
+import { haversineDistanceMeters } from '../helpers/geoHelper.js';
 
 /**
- * 1. Reverse Geocoding: Get State, District, Locality, Address
+ * 1. Reverse Geocoding: Get Locality, District, Ward, State, Address
  */
 export async function reverseGeocodeLocation(latitude, longitude) {
   const lat = parseFloat(latitude);
   const lng = parseFloat(longitude);
 
+  // Compute a deterministic ward number based on coordinates if OSM doesn't return one
+  const computedWardNum = Math.abs(Math.floor((lat * 100 + lng * 100) % 24)) + 1;
+  const defaultWard = `Central Ward #${computedWardNum}`;
+
   const defaultGeo = {
     address: `Location near (${lat.toFixed(4)}°, ${lng.toFixed(4)}°)`,
     locality: 'Central Sector',
+    ward: defaultWard,
     district: 'Central District',
     state: 'National Capital Territory',
     postcode: '',
@@ -41,7 +31,7 @@ export async function reverseGeocodeLocation(latitude, longitude) {
     const res = await fetch(
       `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=16&addressdetails=1`,
       {
-        headers: { 'User-Agent': 'CivicSense-App/1.0' },
+        headers: { 'User-Agent': 'CommunityKiHelp-CivicSense/1.0' },
         signal: controller.signal
       }
     );
@@ -55,12 +45,14 @@ export async function reverseGeocodeLocation(latitude, longitude) {
       const district = a.state_district || a.district || a.county || a.city || 'District Zone';
       const locality = a.suburb || a.neighbourhood || a.residential || a.village || a.town || a.city_district || 'Locality';
       const road = a.road || a.pedestrian || a.subdistrict || '';
+      const wardName = a.city_district || a.suburb ? `${a.city_district || a.suburb} Ward #${computedWardNum}` : defaultWard;
 
       const fullAddr = [road, locality, district, state].filter(Boolean).join(', ');
 
       return {
         address: fullAddr || defaultGeo.address,
         locality,
+        ward: wardName,
         district,
         state,
         postcode: a.postcode || '',
@@ -70,7 +62,7 @@ export async function reverseGeocodeLocation(latitude, longitude) {
       };
     }
   } catch (err) {
-    console.warn('OSM reverse geocode notice: Using spatial location fallback');
+    console.warn('Reverse geocode notice: using spatial coordinate fallback');
   }
 
   return defaultGeo;
@@ -78,13 +70,12 @@ export async function reverseGeocodeLocation(latitude, longitude) {
 
 /**
  * 2. GIS Jurisdiction Classification
- * Determines whether location falls under Municipality / Corporation, Gram Panchayat (Rural), or Block
  */
 export function determineJurisdiction(geoData) {
-  const { rawAddress, district, locality } = geoData;
+  const { rawAddress, district, locality, ward } = geoData;
   const rawStr = JSON.stringify(rawAddress || {}).toLowerCase();
+  const wardTag = ward || 'Ward #14';
 
-  // Check if Urban Corporation / Municipality
   if (
     rawStr.includes('city') ||
     rawStr.includes('municipality') ||
@@ -95,11 +86,11 @@ export function determineJurisdiction(geoData) {
     return {
       type: 'Municipality / Corporation',
       code: 'URBAN_CORP',
-      name: `${district || locality} Municipal Corporation`
+      ward: wardTag,
+      name: `${district || locality} Municipal Corporation (${wardTag})`
     };
   }
 
-  // Check if Rural Gram Panchayat
   if (
     rawStr.includes('village') ||
     rawStr.includes('panchayat') ||
@@ -109,21 +100,22 @@ export function determineJurisdiction(geoData) {
     return {
       type: 'Gram Panchayat (Rural)',
       code: 'GRAM_PANCHAYAT',
+      ward: wardTag,
       name: `${locality || district} Gram Panchayat Board`
     };
   }
 
-  // Default to Municipal / Local Civic Body
   return {
     type: 'Municipality / Local Body',
     code: 'MUNICIPAL_BODY',
-    name: `${district || locality} Municipal Body`
+    ward: wardTag,
+    name: `${district || locality} Municipal Body (${wardTag})`
   };
 }
 
 /**
  * 3. Authority Routing Rules Matrix
- * Maps Jurisdiction + Issue Category to the exact responsible authority
+ * Maps Jurisdiction + Issue Category to exact responsible authority & Department Type (SRS Section 6.9, 12)
  */
 export function routeToResponsibleAuthority(jurisdiction, category) {
   const isRural = jurisdiction.code === 'GRAM_PANCHAYAT';
@@ -131,40 +123,63 @@ export function routeToResponsibleAuthority(jurisdiction, category) {
 
   switch (category) {
     case 'Roads & Traffic':
-      return isRural
-        ? `${prefix} - Rural Engineering Services (RES)`
-        : `${prefix} - Public Works Department (PWD)`;
+      return {
+        authority: isRural
+          ? `${prefix} - Rural Engineering Services (RES)`
+          : `${prefix} - Public Works Department (PWD)`,
+        departmentType: 'ENGINEERING'
+      };
 
     case 'Sanitation & Waste':
-      return isRural
-        ? `${prefix} - Swachh Gram Sanitation Committee`
-        : `${prefix} - Solid Waste Management & Sanitation Board`;
+      return {
+        authority: isRural
+          ? `${prefix} - Swachh Gram Sanitation Committee`
+          : `${prefix} - Solid Waste Management & Sanitation Board`,
+        departmentType: 'SANITATION'
+      };
 
     case 'Water Supply':
-      return isRural
-        ? `${prefix} - Jal Jeevan Village Water Committee`
-        : `${prefix} - City Water Supply & Sewerage Board (Jal Board)`;
+      return {
+        authority: isRural
+          ? `${prefix} - Jal Jeevan Village Water Committee`
+          : `${prefix} - City Water Supply & Sewerage Board (Jal Board)`,
+        departmentType: 'WATER_SEWERAGE'
+      };
 
     case 'Electricity & Lighting':
-      return `${prefix} - State Electricity Distribution Company (Discom)`;
+      return {
+        authority: `${prefix} - State Electricity Distribution Company (Discom)`,
+        departmentType: 'ELECTRICAL'
+      };
 
     case 'Public Safety':
-      return `${prefix} - Local Police & Traffic Enforcement Cell`;
+      return {
+        authority: `${prefix} - Local Police & Ward Enforcement Cell`,
+        departmentType: 'ENFORCEMENT'
+      };
+
+    case 'Drainage & Sewage':
+      return {
+        authority: `${prefix} - Stormwater Drainage & Flood Mitigation Wing`,
+        departmentType: 'ENGINEERING'
+      };
 
     default:
-      return `${prefix} - Civic Administration Department`;
+      return {
+        authority: `${prefix} - Civic Administration Department`,
+        departmentType: 'CIVIC_ADMIN'
+      };
   }
 }
 
 /**
  * 4. Spatial Deduplication & Ticket Creation Engine
- * Checks if an open ticket exists within a 50m radius in the same category.
- * If found, appends report to ticket; otherwise creates a new Ticket ID.
+ * Checks proximity within 75m threshold (SRS Section 6.5)
  */
-export function processSpatialTicket(issueInput, geoData, jurisdiction, authority, existingTickets = []) {
+export function processSpatialTicket(issueInput, geoData, jurisdiction, authorityInfo, existingTickets = []) {
   const { lat, lng } = geoData;
   const category = issueInput.category || 'Roads & Traffic';
-  const DEDUPLICATION_RADIUS_METERS = 75; // 75 meter spatial proximity threshold
+  const DEDUPLICATION_RADIUS_METERS = 75;
 
   // Search for an existing open ticket within spatial threshold
   let matchedTicket = null;
@@ -179,19 +194,20 @@ export function processSpatialTicket(issueInput, geoData, jurisdiction, authorit
   }
 
   const nowStr = new Date().toISOString();
-  const districtPrefix = (geoData.district || 'GEN').slice(0, 3).toUpperCase().replace(/[^A-Z]/g, 'X');
+  const wardCode = (jurisdiction.ward || 'WRD').replace(/[^a-zA-Z0-9]/g, '').slice(0, 5).toUpperCase();
 
   if (matchedTicket) {
-    // Spatial duplicate found: Append citizen report to existing Ticket
+    // Spatial duplicate found: Append report to existing Issue (SRS Section 4 & 6.5)
     matchedTicket.linkedReportsCount = (matchedTicket.linkedReportsCount || 1) + 1;
-    matchedTicket.upvotes += 1;
+    matchedTicket.upvotes = (matchedTicket.upvotes || 0) + 1;
     matchedTicket.timeline.push({
       status: 'Duplicate Linked',
-      date: new Date().toLocaleString(),
-      detail: `New citizen report linked at same location (${lat.toFixed(4)}°, ${lng.toFixed(4)}°). Total reports: ${matchedTicket.linkedReportsCount}`
+      date: 'Just now',
+      detail: `New citizen evidence linked at same location (${lat.toFixed(4)}°, ${lng.toFixed(4)}°). Total reports: ${matchedTicket.linkedReportsCount}`
     });
     matchedTicket.reportsList.push({
-      reporterName: issueInput.reporterName || 'Prakash Kumar',
+      id: `rep-${Date.now()}`,
+      reporterName: issueInput.reporterName || 'Citizen Contributor',
       description: issueInput.description,
       imageUrl: issueInput.imageUrl,
       createdAt: nowStr
@@ -200,25 +216,28 @@ export function processSpatialTicket(issueInput, geoData, jurisdiction, authorit
     return {
       ticket: matchedTicket,
       isDuplicate: true,
-      message: `Linked to existing Ticket #${matchedTicket.ticketId} (${matchedTicket.linkedReportsCount} Citizen Reports linked)`
+      message: `Linked to existing Issue #${matchedTicket.issueNumber || matchedTicket.ticketId} (${matchedTicket.linkedReportsCount} Citizen Reports linked)`
     };
   }
 
-  // No duplicate nearby: Generate new Ticket
-  const ticketIdNumber = Math.floor(1000 + Math.random() * 9000);
-  const newTicketId = `TKT-${districtPrefix}-${new Date().getFullYear()}-${ticketIdNumber}`;
+  // Create New Issue & Operational Ticket
+  const issueNum = Math.floor(100 + Math.random() * 900);
+  const issueNumber = `CKH-${issueNum}`;
+  const ticketId = `TKT-${wardCode}-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
   const newTicket = {
     id: `issue-${Date.now()}`,
-    ticketId: newTicketId,
+    issueNumber,
+    ticketId,
     title: issueInput.title,
     category,
     priority: issueInput.priority || 'Medium',
-    status: 'pending',
+    status: 'pending', // REPORTED
     location: issueInput.location || geoData.address,
     geoData,
     jurisdiction,
-    assignedAuthority: authority,
+    departmentType: authorityInfo.departmentType,
+    assignedAuthority: authorityInfo.authority,
     description: issueInput.description,
     imageUrl: issueInput.imageUrl,
     latitude: lat,
@@ -230,10 +249,11 @@ export function processSpatialTicket(issueInput, geoData, jurisdiction, authorit
     reporter: {
       name: issueInput.reporterName || 'Prakash Kumar',
       avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=150',
-      badge: 'Civic Champion'
+      badge: 'Active Citizen'
     },
     reportsList: [
       {
+        id: `rep-${Date.now()}`,
         reporterName: issueInput.reporterName || 'Prakash Kumar',
         description: issueInput.description,
         imageUrl: issueInput.imageUrl,
@@ -242,9 +262,9 @@ export function processSpatialTicket(issueInput, geoData, jurisdiction, authorit
     ],
     timeline: [
       {
-        status: 'Ticket Created',
-        date: new Date().toLocaleString(),
-        detail: `Ticket #${newTicketId} generated under ${jurisdiction.type}. Routed to ${authority}.`
+        status: 'Reported',
+        date: 'Just now',
+        detail: `Issue #${issueNumber} raised. Routed to ${jurisdiction.name} Secretary Panel (${authorityInfo.authority}).`
       }
     ],
     comments: []
@@ -253,6 +273,6 @@ export function processSpatialTicket(issueInput, geoData, jurisdiction, authorit
   return {
     ticket: newTicket,
     isDuplicate: false,
-    message: `New Ticket #${newTicketId} generated and assigned to ${authority}`
+    message: `Issue #${issueNumber} generated and routed to ${authorityInfo.authority}`
   };
 }

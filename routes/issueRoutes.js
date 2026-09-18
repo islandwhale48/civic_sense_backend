@@ -1,22 +1,23 @@
 import express from 'express';
-import multer from 'multer';
+import { uploadSingleImage } from '../middleware/uploadMiddleware.js';
 import {
   createIssue,
   getIssues,
+  getIssueById,
+  toggleSupport,
   routeAuthorityPreview,
   refineDescriptionWithAI
 } from '../controllers/issueController.js';
 
 const router = express.Router();
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }
-});
-
-router.post('/issues', upload.single('image'), createIssue);
+// Public & Citizen Endpoints per SRS Section 10
 router.get('/issues', getIssues);
-router.get('/tickets', getIssues);
+router.post('/issues', uploadSingleImage, createIssue);
+router.get('/issues/:id', getIssueById);
+router.post('/issues/:id/support', toggleSupport);
+
+// Route Preview & AI Refine
 router.post('/issues/route-authority', routeAuthorityPreview);
 router.post('/issues/nearest-local-body', routeAuthorityPreview);
 router.post('/issues/ai-refine', refineDescriptionWithAI);
