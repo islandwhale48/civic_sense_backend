@@ -11,6 +11,7 @@ import {
 } from '../services/authorityRoutingService.js';
 import { getDecoratedIssues } from '../services/escalationService.js';
 import { getIssuesStore, setIssuesStore } from '../models/dataStore.js';
+import mongoose from 'mongoose';
 
 /**
  * Submit civic report: Image AI Check ➔ Reverse Geocode ➔ Ward Identification ➔ Routing ➔ Spatial Deduplication
@@ -267,5 +268,320 @@ Action Needed: Requesting prompt site inspection and repair by the responsible m
     });
   } catch (err) {
     return error(res, 'Failed to refine description with AI.', 500);
+  }
+}
+
+/**
+ * Get issues filtered by assigned authority / local body name
+ * Supports partial match for flexibility (jurisdiction.name or assignedAuthority)
+ */
+export async function getIssuesByAuthority(req, res) {
+  try {
+    const { authority, ward, status, category } = req.query;
+
+    if (!authority && !ward) {
+      return error(res, 'Either "authority" or "ward" query param is required', 400);
+    }
+
+    let issues = await IssueModel.findAll();
+    setIssuesStore(issues);
+    issues = getDecoratedIssues();
+
+    // Filter by authority name (partial, case-insensitive)
+    if (authority) {
+      const q = authority.toLowerCase();
+      issues = issues.filter((i) =>
+        (i.assignedAuthority && i.assignedAuthority.toLowerCase().includes(q)) ||
+        (i.jurisdiction?.name && i.jurisdiction.name.toLowerCase().includes(q))
+      );
+    }
+
+    // Additional ward filter
+    if (ward) {
+      const w = ward.toLowerCase();
+      issues = issues.filter((i) =>
+        (i.jurisdiction?.ward && i.jurisdiction.ward.toLowerCase().includes(w)) ||
+        (i.geoData?.ward && i.geoData.ward.toLowerCase().includes(w))
+      );
+    }
+
+    // Optional status filter
+    if (status && status !== 'All') {
+      const s = status.toLowerCase();
+      issues = issues.filter((i) => i.status && i.status.toLowerCase() === s);
+    }
+
+    // Optional category filter
+    if (category && category !== 'All') {
+      issues = issues.filter((i) => i.category === category);
+    }
+
+    // Sort: pending first (most urgent), then by escalation score
+    issues.sort((a, b) => {
+      const order = { pending: 0, in_progress: 1, work_assigned: 2, pending_inspection: 3, resolution_submitted: 4, resolved: 5, rejected: 6 };
+      const aOrder = order[a.status] ?? 99;
+      const bOrder = order[b.status] ?? 99;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return (b.sla?.escalationScore || 0) - (a.sla?.escalationScore || 0);
+    });
+
+    return res.json({
+      issues,
+      count: issues.length,
+      stats: {
+        total: issues.length,
+        pending: issues.filter((i) => i.status === 'pending').length,
+        in_progress: issues.filter((i) => ['in_progress', 'work_assigned'].includes(i.status)).length,
+        pending_inspection: issues.filter((i) => i.status === 'pending_inspection').length,
+        resolution_submitted: issues.filter((i) => i.status === 'resolution_submitted').length,
+        resolved: issues.filter((i) => i.status === 'resolved').length,
+        escalated: issues.filter((i) => i.sla?.isEscalated && i.status !== 'resolved').length
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching authority issues:', err);
+    return error(res, 'Failed to fetch authority issues', 500);
+  }
+}
+
+/**
+ * Update issue status (Authority action)
+ * Allowed transitions: pending → in_progress → work_assigned → pending_inspection
+ */
+export async function updateIssueStatus(req, res) {
+  try {
+    const { id } = req.params;
+    const { status, note, authorityName } = req.body;
+
+    const ALLOWED_STATUSES = ['in_progress', 'work_assigned', 'pending_inspection'];
+    if (!ALLOWED_STATUSES.includes(status)) {
+      return error(res, `Invalid status. Allowed: ${ALLOWED_STATUSES.join(', ')}`, 400);
+    }
+
+    // Update in-memory store
+    const issues = getIssuesStore();
+    const issue = issues.find((i) => i.id === id || i.issueNumber === id || i.ticketId === id);
+
+    if (!issue) {
+      return error(res, 'Issue not found', 404);
+    }
+
+    const prevStatus = issue.status;
+    issue.status = status;
+    issue.updatedAt = new Date().toISOString();
+
+    const statusLabels = {
+      in_progress: 'In Progress',
+      work_assigned: 'Work Assigned',
+      pending_inspection: 'Pending Inspection'
+    };
+
+    issue.timeline = issue.timeline || [];
+    issue.timeline.push({
+      status: statusLabels[status] || status,
+      date: 'Just now',
+      detail: note || `Status updated to "${statusLabels[status]}" by ${authorityName || 'Authority Officer'}.`
+    });
+
+    setIssuesStore(issues);
+
+    // Persist to MongoDB
+    try {
+      await mongoose.model('Issue').findOneAndUpdate(
+        { $or: [{ id }, { issueNumber: id }, { ticketId: id }] },
+        { $set: { status: issue.status, timeline: issue.timeline, updatedAt: new Date() } }
+      );
+    } catch (dbErr) {
+      console.warn('MongoDB update skipped (in-memory updated):', dbErr.message);
+    }
+
+    return success(res, { issue, previousStatus: prevStatus }, `Status updated to ${statusLabels[status]}`);
+  } catch (err) {
+    console.error('Error updating issue status:', err);
+    return error(res, 'Failed to update issue status', 500);
+  }
+}
+
+/**
+ * Submit resolution request (Authority action)
+ * Stores completion description + photo, sets reviewStatus: PENDING
+ * Admin must verify before issue becomes RESOLVED
+ */
+export async function submitResolution(req, res) {
+  try {
+    const { id } = req.params;
+    const { description, submittedBy } = req.body;
+
+    if (!description || !description.trim()) {
+      return error(res, 'Completion description is required', 400);
+    }
+
+    // Handle completion photo upload
+    let afterImageUrl = req.body.afterImageUrl || '';
+    if (req.file && req.file.buffer) {
+      try {
+        afterImageUrl = await uploadImageToCloudinary(req.file.buffer, req.file.mimetype);
+      } catch (uploadErr) {
+        console.warn('Resolution image upload failed:', uploadErr.message);
+      }
+    }
+
+    const issues = getIssuesStore();
+    const issue = issues.find((i) => i.id === id || i.issueNumber === id || i.ticketId === id);
+
+    if (!issue) {
+      return error(res, 'Issue not found', 404);
+    }
+
+    const nowStr = new Date().toISOString();
+    issue.resolution = {
+      id: `res-${Date.now()}`,
+      submittedBy: submittedBy || 'Authority Officer',
+      description: description.trim(),
+      afterImageUrl,
+      submittedAt: nowStr,
+      reviewStatus: 'PENDING',
+      reviewedBy: null,
+      reviewedAt: null,
+      adminNotes: null
+    };
+    issue.status = 'resolution_submitted';
+    issue.updatedAt = nowStr;
+    issue.timeline = issue.timeline || [];
+    issue.timeline.push({
+      status: 'Resolution Submitted',
+      date: 'Just now',
+      detail: `Work completion reported by ${submittedBy || 'Authority Officer'}. Pending admin verification.`
+    });
+
+    setIssuesStore(issues);
+
+    // Persist to MongoDB
+    try {
+      await mongoose.model('Issue').findOneAndUpdate(
+        { $or: [{ id }, { issueNumber: id }, { ticketId: id }] },
+        { $set: { resolution: issue.resolution, status: issue.status, timeline: issue.timeline, updatedAt: new Date() } }
+      );
+    } catch (dbErr) {
+      console.warn('MongoDB resolution update skipped:', dbErr.message);
+    }
+
+    return success(res, { issue }, 'Resolution submitted. Pending admin verification.', 201);
+  } catch (err) {
+    console.error('Error submitting resolution:', err);
+    return error(res, 'Failed to submit resolution', 500);
+  }
+}
+
+/**
+ * Admin review of submitted resolution
+ * decision: 'APPROVED' → issue becomes resolved | 'REJECTED' → sent back to authority
+ */
+export async function adminReviewResolution(req, res) {
+  try {
+    const { id } = req.params;
+    const { decision, adminNotes, adminId, adminName } = req.body;
+
+    if (!['APPROVED', 'REJECTED'].includes(decision)) {
+      return error(res, 'Decision must be APPROVED or REJECTED', 400);
+    }
+
+    // Basic admin auth via header or body token
+    const adminPin = req.headers['x-admin-pin'] || req.body.adminPin;
+    const expectedPin = process.env.ADMIN_PIN || 'ADMIN-2026';
+    if (adminPin !== expectedPin) {
+      return res.status(403).json({ success: false, error: 'Invalid admin PIN. Access denied.' });
+    }
+
+    const issues = getIssuesStore();
+    const issue = issues.find((i) => i.id === id || i.issueNumber === id || i.ticketId === id);
+
+    if (!issue) {
+      return error(res, 'Issue not found', 404);
+    }
+
+    if (!issue.resolution || issue.resolution.reviewStatus !== 'PENDING') {
+      return error(res, 'No pending resolution found for this issue', 400);
+    }
+
+    const nowStr = new Date().toISOString();
+    issue.resolution.reviewStatus = decision;
+    issue.resolution.reviewedBy = adminName || adminId || 'Admin';
+    issue.resolution.reviewedAt = nowStr;
+    issue.resolution.adminNotes = adminNotes || null;
+    issue.updatedAt = nowStr;
+
+    if (decision === 'APPROVED') {
+      issue.status = 'resolved';
+      issue.timeline = issue.timeline || [];
+      issue.timeline.push({
+        status: 'Resolved ✓',
+        date: 'Just now',
+        detail: `Admin verified work completion. Issue officially resolved.${adminNotes ? ' Note: ' + adminNotes : ''}`
+      });
+    } else {
+      // Rejected: send back to authority for rework
+      issue.status = 'pending_inspection';
+      issue.timeline = issue.timeline || [];
+      issue.timeline.push({
+        status: 'Resolution Rejected',
+        date: 'Just now',
+        detail: `Admin requested rework. ${adminNotes ? 'Reason: ' + adminNotes : 'Please re-inspect and resubmit.'}`
+      });
+    }
+
+    setIssuesStore(issues);
+
+    // Persist to MongoDB
+    try {
+      await mongoose.model('Issue').findOneAndUpdate(
+        { $or: [{ id }, { issueNumber: id }, { ticketId: id }] },
+        { $set: { resolution: issue.resolution, status: issue.status, timeline: issue.timeline, updatedAt: new Date() } }
+      );
+    } catch (dbErr) {
+      console.warn('MongoDB admin review update skipped:', dbErr.message);
+    }
+
+    return success(res, { issue, decision }, decision === 'APPROVED' ? 'Issue marked as Resolved.' : 'Resolution rejected. Authority notified.');
+  } catch (err) {
+    console.error('Error reviewing resolution:', err);
+    return error(res, 'Failed to process admin review', 500);
+  }
+}
+
+/**
+ * Get all pending resolutions for admin review queue
+ */
+export async function getPendingResolutions(req, res) {
+  try {
+    const adminPin = req.headers['x-admin-pin'];
+    const expectedPin = process.env.ADMIN_PIN || 'ADMIN-2026';
+    if (adminPin !== expectedPin) {
+      return res.status(403).json({ success: false, error: 'Invalid admin PIN. Access denied.' });
+    }
+
+    let issues = await IssueModel.findAll();
+    setIssuesStore(issues);
+    issues = getDecoratedIssues();
+
+    const pendingResolutions = issues.filter((i) => i.resolution && i.resolution.reviewStatus === 'PENDING');
+    const allResolutions = issues.filter((i) => i.resolution);
+    const approvedCount = allResolutions.filter((i) => i.resolution.reviewStatus === 'APPROVED').length;
+    const rejectedCount = allResolutions.filter((i) => i.resolution.reviewStatus === 'REJECTED').length;
+
+    return res.json({
+      issues: pendingResolutions,
+      count: pendingResolutions.length,
+      stats: {
+        totalResolved: issues.filter((i) => i.status === 'resolved').length,
+        pendingReview: pendingResolutions.length,
+        approved: approvedCount,
+        rejected: rejectedCount,
+        totalIssues: issues.length
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching pending resolutions:', err);
+    return error(res, 'Failed to fetch pending resolutions', 500);
   }
 }

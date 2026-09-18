@@ -181,10 +181,10 @@ export function processSpatialTicket(issueInput, geoData, jurisdiction, authorit
   const category = issueInput.category || 'Roads & Traffic';
   const DEDUPLICATION_RADIUS_METERS = 75;
 
-  // Search for an existing open ticket within spatial threshold
+
   let matchedTicket = null;
   for (const ticket of existingTickets) {
-    if (ticket.status !== 'resolved' && ticket.category === category && ticket.latitude && ticket.longitude) {
+    if (ticket.status !== 'RESOLVED' && ticket.category === category && ticket.latitude && ticket.longitude) {
       const distance = haversineDistanceMeters(lat, lng, ticket.latitude, ticket.longitude);
       if (distance <= DEDUPLICATION_RADIUS_METERS) {
         matchedTicket = ticket;
@@ -240,11 +240,17 @@ export function processSpatialTicket(issueInput, geoData, jurisdiction, authorit
     assignedAuthority: authorityInfo.authority,
     description: issueInput.description,
     imageUrl: issueInput.imageUrl,
+    media: {
+      url: issueInput.imageUrl,
+      uploader: issueInput.reporterName || 'Prakash Kumar'
+    },
     latitude: lat,
     longitude: lng,
     upvotes: 1,
+    supportCount: 1,
+    reportCount: 1,
+    followerCount: 1,
     upvotedByUser: true,
-    linkedReportsCount: 1,
     createdAt: nowStr,
     reporter: {
       name: issueInput.reporterName || 'Prakash Kumar',
