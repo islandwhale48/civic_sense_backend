@@ -1,6 +1,11 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import dns from 'node:dns';
+
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 import apiRoutes from './routes/index.js';
 import { extractUserRole } from './middleware/authMiddleware.js';
 import { errorHandler } from './middleware/errorMiddleware.js';

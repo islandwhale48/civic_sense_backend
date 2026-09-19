@@ -48,7 +48,13 @@ export async function createIssue(req, res) {
     // 2. Image URL handling
     let imageUrl = req.body.imageUrl || '';
     if (req.file && req.file.buffer) {
-      imageUrl = await uploadImageToCloudinary(req.file.buffer, req.file.mimetype);
+      try {
+        imageUrl = await uploadImageToCloudinary(req.file.buffer, req.file.mimetype);
+      } catch (uploadErr) {
+        console.warn('Image upload failed, using Data URI fallback:', uploadErr.message);
+        const base64Data = req.file.buffer.toString('base64');
+        imageUrl = `data:${req.file.mimetype || 'image/jpeg'};base64,${base64Data}`;
+      }
     } else if (!imageUrl) {
       imageUrl = 'https://images.unsplash.com/photo-1584467735871-8e85353a8413?auto=format&fit=crop&q=80&w=800';
     }

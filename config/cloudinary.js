@@ -17,13 +17,19 @@ if (isConfigured) {
   });
 }
 
+import dns from 'node:dns';
+
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
 /**
  * Upload buffer to Cloudinary or return Data URI fallback
  */
 export async function uploadImageToCloudinary(fileBuffer, mimeType = 'image/jpeg') {
-  if (isConfigured) {
+  if (isConfigured && fileBuffer) {
     try {
-      return new Promise((resolve, reject) => {
+      const secureUrl = await new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
           { folder: 'civic_sense_issues' },
           (error, result) => {
@@ -33,14 +39,19 @@ export async function uploadImageToCloudinary(fileBuffer, mimeType = 'image/jpeg
         );
         uploadStream.end(fileBuffer);
       });
+      return secureUrl;
     } catch (err) {
-      console.warn('Cloudinary upload error, using fallback:', err.message);
+      console.warn('⚠️ Cloudinary upload error, using fallback Data URI:', err.message);
     }
   }
 
   // Fallback Data URI encoding for instant local preview without API keys required
-  const base64Data = fileBuffer.toString('base64');
-  return `data:${mimeType};base64,${base64Data}`;
+  if (fileBuffer) {
+    const base64Data = fileBuffer.toString('base64');
+    return `data:${mimeType};base64,${base64Data}`;
+  }
+
+  return 'https://images.unsplash.com/photo-1584467735871-8e85353a8413?auto=format&fit=crop&q=80&w=800';
 }
 
 export default cloudinary;
