@@ -32,7 +32,8 @@ async function configureDnsForSrvUri(uri) {
 }
 
 export async function connectMongo() {
-  const uri = process.env.DATABASE_URL || process.env.MONGODB_URI;
+  const uri = process.env.MONGODB_URI;
+  console.log("MONGODB_URI loaded:", !!process.env.MONGODB_URI);
   if (!uri) {
     console.error('❌ MONGODB_URI not set in .env');
     throw new Error('MONGODB_URI not set');

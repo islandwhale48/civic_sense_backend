@@ -4,7 +4,7 @@ import IssueModel from '../models/Issues.js';
 import AuthorityModel from '../models/Authority.js';
 import { ensureWardAuthorityAccount } from '../services/wardAuthorityService.js';
 import { uploadImageToCloudinary } from '../config/cloudinary.js';
-import { validateCivicImage } from '../services/imageDetectorService.js';
+// import { validateCivicImage } from '../services/imageDetectorService.js';
 import {
   reverseGeocodeLocation,
   determineJurisdiction,
@@ -36,14 +36,14 @@ export async function createIssue(req, res) {
       return error(res, 'Validation failed', 400, validation.errors);
     }
 
-    // 1. AI Image Validation
-    let imageScan = null;
-    if (req.file && req.file.buffer) {
-      imageScan = await validateCivicImage(req.file.buffer, req.file.mimetype, category);
-      if (imageScan && imageScan.is_relevant === false) {
-        return error(res, imageScan.message || 'Invalid photo detected. Please upload an image showing the civic issue.', 400);
-      }
-    }
+    // // 1. AI Image Validation
+    // let imageScan = null;
+    // if (req.file && req.file.buffer) {
+    //   imageScan = await validateCivicImage(req.file.buffer, req.file.mimetype, category);
+    //   if (imageScan && imageScan.is_relevant === false) {
+    //     return error(res, imageScan.message || 'Invalid photo detected. Please upload an image showing the civic issue.', 400);
+    //   }
+    // }
 
     // 2. Image URL handling
     let imageUrl = req.body.imageUrl || '';
@@ -110,7 +110,7 @@ export async function createIssue(req, res) {
         local_body: wardAuthority.local_body,
         password: wardAuthority.password
       },
-      aiScan: imageScan
+      aiScan: null
     }, result.message, 201);
   } catch (err) {
     console.error('Error creating issue:', err);

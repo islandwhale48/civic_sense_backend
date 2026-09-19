@@ -41,9 +41,9 @@ async function startServer() {
     console.warn('⚠️  MongoDB unavailable — running with in-memory data store only.');
     console.warn('   Reason:', err.message);
   }
-  app.listen(PORT, () => {
-    console.log(`🚀 CommunityKiHelp Backend Server running on http://localhost:${PORT}`);
-  });
+ app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 CommunityKiHelp Backend Server running on port ${PORT}`);
+});
 }
 
 startServer();
